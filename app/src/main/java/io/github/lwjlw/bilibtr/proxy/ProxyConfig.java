@@ -262,6 +262,12 @@ public final class ProxyConfig {
         return FALLBACK_LAST_WATER_MS;
     }
 
+    /** 持久化原始配置：0 表示自动计算，不能保存为某次计算出的水位。 */
+    static int lastWaterOverrideMs() {
+        reloadIfStale();
+        return lastWaterMs;
+    }
+
     /** 低水位是怎么来的（日志用）。 */
     public static String lastWaterSource() {
         reloadIfStale();

@@ -207,8 +207,12 @@ public final class BufferTuneProbe {
         return sb.toString();
     }
 
-    /** 上一次"按当前视频码率"下发过的缓冲上限（避免重复反射调用）。 */
+    /** 去重必须包含播放器身份和水位；切清晰度可能复用同一播放器。 */
+    private static java.lang.ref.WeakReference<Object> lastAppliedPlayer = new java.lang.ref.WeakReference<>(null);
     private static volatile long lastAppliedMaxBytes = -1;
+    private static long lastAppliedFirstMs = -1;
+    private static long lastAppliedNextMs = -1;
+    private static long lastAppliedLastMs = -1;
 
     /**
      * **按当前视频的码率重算缓冲上限并重新下发**（2026-10-13 加）。
@@ -217,7 +221,7 @@ public final class BufferTuneProbe {
      * 别人的"秒数 → 字节"要乘**视频码率**，而 `setOption` 只在播放器初始化那一刻被我们拦到，
      * 那时**当前视频的地址还不知道**（`CdnRacer.lastUrl()` 还是上一部，或者干脆是兜底的
      * 1.5MB/s）→ 算出来的上限会偏小。所以由 {@link io.github.lwjlw.bilibtr.proxy.StatsPusher}
-     * 每 2 秒调一次这个方法：一旦当前视频的 `bw` 让上限**变了**，就重新下发一次。
+     * 每 2 秒调一次这个方法：当前视频、配置或播放器变了，就下发有变化的容量和水位。
      *
      * 只在值真的变化时才动手（正常播放全程最多 1~2 次），且任何异常都吞掉 ——
      * 这段代码永远不该影响播放。
@@ -225,25 +229,51 @@ public final class BufferTuneProbe {
      * 依赖方向说明：这里由 `proxy` 包反向调用 `recon.probes`，是为了**只保留一份**
      * 反射设置选项的实现（`callSetOption`）；两个包没有编译期循环依赖。
      */
-    public static void reassertForCurrentStream() {
+    public static synchronized void reassertForCurrentStream() {
         try {
-            long want = ProxyConfig.bufferSizeBytes();
-            if (want <= 0) return;                    // 两个旋钮都没设 → 不干预
-            if (want == lastAppliedMaxBytes) return;  // 没变，不动
             Object p = io.github.lwjlw.bilibtr.proxy.PlaySpeed.player();
             if (p == null) return;                    // 还没抓到播放器实例
+            long want = ProxyConfig.bufferSizeBytes();
+            long first = ProxyConfig.firstWaterMs();
+            long next = ProxyConfig.nextWaterMs();
+            long last = ProxyConfig.lastWaterMs();
+            boolean samePlayer = lastAppliedPlayer.get() == p;
+            long maxToApply = want;
+            if (want <= 0 && samePlayer && lastAppliedMaxBytes > 0) {
+                // 取消容量覆盖时只恢复确实见过的宿主值，不猜测“默认 150MB”。
+                try {
+                    maxToApply = Long.parseLong(APP_RAW.getOrDefault("max-buffer-size", "0"));
+                } catch (NumberFormatException ignored) {
+                    maxToApply = 0;
+                }
+            }
+            boolean applyMax = maxToApply > 0 && (!samePlayer || want != lastAppliedMaxBytes);
+            boolean applyFirst = !samePlayer || first != lastAppliedFirstMs;
+            boolean applyNext = !samePlayer || next != lastAppliedNextMs;
+            boolean applyLast = !samePlayer || last != lastAppliedLastMs;
+            if (!applyMax && !applyFirst && !applyNext && !applyLast) return;
             // ⚠️ 必须标记成"我们自己的调用"：否则 hook 会把这次 setOption 当成 B站 的行为，
             //    既污染 APP_RAW（日志里"B站 原始 max-buffer-size"会变成我们自己的值），
             //    又会多触发一次搭便车的 applyWaterMarks。
+            boolean wasOurs = OURS.get();
             OURS.set(Boolean.TRUE);
             try {
-                callSetOption(p, 4 /* IJK_OPT_CATEGORY_PLAYER */, "max-buffer-size", want);
+                if (applyMax) callSetOption(p, 4, "max-buffer-size", maxToApply);
+                if (applyFirst) callSetOption(p, 4, "first-high-water-mark-ms", first);
+                if (applyNext) callSetOption(p, 4, "next-high-water-mark-ms", next);
+                if (applyLast) callSetOption(p, 4, "last-high-water-mark-ms", last);
             } finally {
-                OURS.set(Boolean.FALSE);
+                OURS.set(wasOurs);
             }
-            lastAppliedMaxBytes = want;
-            Recon.note("OPT:RESIZE", "按当前视频码率重算缓冲上限 → " + want + "B（"
-                    + ProxyConfig.bufferSizeSource() + "）");
+            lastAppliedPlayer = new java.lang.ref.WeakReference<>(p);
+            // 未知宿主原值时保留待恢复状态；之后原值出现还可以再恢复。
+            if (want > 0 || !samePlayer || lastAppliedMaxBytes <= 0 || applyMax) lastAppliedMaxBytes = want;
+            lastAppliedFirstMs = first;
+            lastAppliedNextMs = next;
+            lastAppliedLastMs = last;
+            Recon.note("OPT:RESIZE", "更新当前播放器缓冲：容量="
+                    + (applyMax ? maxToApply + "B" : "保持") + "，水位="
+                    + first + "/" + next + "/" + last + "ms");
         } catch (Throwable t) {
             Recon.note("OPT:ERR", "重算缓冲上限失败：" + t);
         }

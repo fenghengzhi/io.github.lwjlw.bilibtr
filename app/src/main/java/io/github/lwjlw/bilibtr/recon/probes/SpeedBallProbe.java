@@ -24,13 +24,13 @@ import io.github.lwjlw.bilibtr.recon.Recon;
 import io.github.lwjlw.bilibtr.recon.Reflect;
 
 /**
- * **播放页悬浮球：3x / 4x 倍速**（B站 原生没有）。
+ * **播放页悬浮球：根据播放器上限提供倍速快捷档位**。
  *
  * ## 交互
  * - **点一下画面才出现**，几秒不操作**自动隐藏**（和播放器自带控件一个脾气）；
  * - **可以拖动**（按住球拖到任意位置）；
- * - 三个按钮：`3x` `4x` `跟`（跟随 B站），当前选中的高亮成绿色；
- * - 选 3x/4x = **强制覆盖**；选"跟" = **设回 B站 自己的倍速**（不是"什么都不做"）；
+ * - 三个按钮：两个可用倍速和 `跟`（跟随 B站），当前选中的高亮成绿色；
+ * - 选倍速档位 = **强制覆盖**；选"跟" = **设回 B站 自己的倍速**（不是"什么都不做"）；
  * - App 里有总开关（`btr.conf` 的 `ball=`）；**关掉后已经画出来的球会立刻消失**。
  *
  * ## 实现要点
@@ -145,9 +145,17 @@ public final class SpeedBallProbe {
             bar.setTag(TAG_ID);
             bar.setOrientation(LinearLayout.VERTICAL);
             bar.setVisibility(View.GONE);
-            bar.addView(chip(act, bar, "3x", 3f));
-            bar.addView(chip(act, bar, "4x", 4f));
+            float[] speeds = PlaySpeed.buttonSpeeds();
+            bar.addView(chip(act, bar, speedLabel(speeds[0]), speeds[0]));
+            bar.addView(chip(act, bar, speedLabel(speeds[1]), speeds[1]));
             bar.addView(chip(act, bar, "跟", 0f));
+            TextView limit = new TextView(act);
+            limit.setTextColor(Color.LTGRAY);
+            limit.setTextSize(10f);
+            limit.setGravity(Gravity.CENTER);
+            limit.setPadding(dp(act, 3), dp(act, 4), dp(act, 3), dp(act, 4));
+            limit.setBackgroundColor(0xCC222222);
+            bar.addView(limit);
 
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -181,6 +189,7 @@ public final class SpeedBallProbe {
                                  final String label, final float speed) {
         final TextView tv = new TextView(act);
         tv.setText(label);
+        tv.setTag(speed);
         tv.setTextColor(Color.WHITE);
         tv.setTextSize(13f);
         tv.setGravity(Gravity.CENTER);
@@ -191,7 +200,8 @@ public final class SpeedBallProbe {
         lp.topMargin = dp(act, 6);
         tv.setLayoutParams(lp);
         tv.setOnClickListener(v -> {
-            PlaySpeed.setOverride(speed);
+            Object selected = tv.getTag();
+            if (selected instanceof Number) PlaySpeed.setOverride(((Number) selected).floatValue());
             refresh(act);
             scheduleHide(act);
         });
@@ -206,13 +216,20 @@ public final class SpeedBallProbe {
             LinearLayout bar = ballOf(act);
             if (bar == null) return;
             float cur = PlaySpeed.override();
-            for (int i = 0; i < bar.getChildCount(); i++) {
+            float[] speeds = PlaySpeed.buttonSpeeds();
+            float maximum = PlaySpeed.maxSpeed();
+            String limit = maximum > 0f ? "最高 " + speedLabel(maximum) : "上限未读取";
+            bar.setContentDescription("播放倍速，" + limit);
+            for (int i = 0; i < Math.min(3, bar.getChildCount()); i++) {
                 TextView tv = (TextView) bar.getChildAt(i);
-                float s = "3x".equals(tv.getText().toString()) ? 3f
-                        : "4x".equals(tv.getText().toString()) ? 4f : 0f;
+                float s = i < 2 ? speeds[i] : 0f;
+                tv.setTag(s);
+                tv.setText(i < 2 ? speedLabel(s) : "跟");
+                tv.setContentDescription(i < 2 ? "播放 " + speedLabel(s) + "，" + limit : "跟随 B站 倍速");
                 boolean on = Math.abs(s - cur) < 0.01f;
                 tv.setBackgroundColor(on ? 0xFF2E7D32 : 0xCC222222);
             }
+            if (bar.getChildCount() > 3) ((TextView) bar.getChildAt(3)).setText(limit);
         } catch (Throwable ignored) {
         }
     }
@@ -225,8 +242,8 @@ public final class SpeedBallProbe {
                 bar = ballOf(act);
             }
             if (bar == null) return;
+            refresh(act);
             if (bar.getVisibility() != View.VISIBLE) {
-                refresh(act);
                 bar.setVisibility(View.VISIBLE);
                 Recon.note("BALL:SHOW", "显示悬浮球 @" + act.getClass().getSimpleName());
             }
@@ -249,6 +266,10 @@ public final class SpeedBallProbe {
 
     private static int dp(Activity act, int v) {
         return Math.round(v * act.getResources().getDisplayMetrics().density);
+    }
+
+    private static String speedLabel(float value) {
+        return (value == (int) value ? String.valueOf((int) value) : String.valueOf(value)) + "x";
     }
 
     /**

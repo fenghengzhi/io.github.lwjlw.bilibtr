@@ -26,6 +26,8 @@ public final class PlaySpeed {
     private static volatile float override = 0f;
     /** B站 自己设过的倍速（默认 1.0）；"跟随"时要设回它。 */
     private static volatile float appSpeed = 1f;
+    /** 点击“跟随”后，优先恢复 B站 设置，不再使用配置里的测试倍速。 */
+    private static volatile boolean followApp = false;
     /** 当前播放器实例（弱引用，避免把 Activity 拖住）。 */
     private static volatile java.lang.ref.WeakReference<Object> player = null;
 
@@ -71,6 +73,68 @@ public final class PlaySpeed {
     /** 当前抓到的真播放器实例（可能为 null）。给缓冲重算等诊断/调参用。 */
     public static Object player() {
         return playerRef();
+    }
+
+    /** 播放器报告的倍速上限；读取不到返回 -1，不能把默认按钮档位当成已知上限。 */
+    public static float maxSpeed() {
+        return maxSpeed(playerRef());
+    }
+
+    private static float maxSpeed(Object p) {
+        return readSpeed(p, "getPlayerPropertyFloat", new Class<?>[]{int.class, float.class}, 10010, -1f);
+    }
+
+    /** 播放器当前实际倍速；与请求值分开，未知时返回 -1。 */
+    public static float actualSpeed() {
+        return actualSpeed(playerRef());
+    }
+
+    private static float actualSpeed(Object p) {
+        float value = readSpeed(p, "getSpeed", new Class<?>[]{float.class}, -1f);
+        if (value < 0f) value = readSpeed(p, "getSpeed", new Class<?>[0]);
+        if (value < 0f) value = readSpeed(p, "getPlaybackSpeed", new Class<?>[0]);
+        return value;
+    }
+
+    /** 只查询已知 getter，兼容 getter 位于父类或为 private 的播放器版本。 */
+    private static float readSpeed(Object p, String name, Class<?>[] types, Object... args) {
+        if (p == null) return -1f;
+        int depth = 0;
+        for (Class<?> c = p.getClass(); c != null && depth++ < 8; c = c.getSuperclass()) {
+            try {
+                Method method = c.getDeclaredMethod(name, types);
+                method.setAccessible(true);
+                Object value = method.invoke(p, args);
+                if (value instanceof Number) {
+                    float speed = ((Number) value).floatValue();
+                    return validSpeed(speed) ? speed : -1f;
+                }
+                return -1f;
+            } catch (NoSuchMethodException ignored) {
+                // 继续找父类。
+            } catch (Throwable ignored) {
+                return -1f;
+            }
+        }
+        return -1f;
+    }
+
+    private static boolean validSpeed(float value) {
+        return Float.isFinite(value) && value >= 0.5f && value <= 20f;
+    }
+
+    private static float clampToPlayer(float value, Object p) {
+        float maximum = maxSpeed(p);
+        return maximum > 0f ? Math.min(value, maximum) : value;
+    }
+
+    /** 两个快捷档位按当前播放器能力显示；未知上限时保留原来的 3x / 4x。 */
+    public static float[] buttonSpeeds() {
+        float maximum = maxSpeed();
+        if (maximum < 0f || maximum >= 4f) return new float[]{3f, 4f};
+        if (maximum >= 3f) return new float[]{2f, 3f};
+        if (maximum >= 2f) return new float[]{1.5f, 2f};
+        return new float[]{Math.min(1f, maximum), maximum};
     }
 
     /** 真播放器的当前播放位置（毫秒）；读不到返回 -1。 */
@@ -148,7 +212,7 @@ public final class PlaySpeed {
      */
     public static void noteAppSpeed(float v) {
         if (APPLYING.get()) return;          // 我们自己设的不算
-        if (v > 0f && v < 20f) appSpeed = v;
+        if (validSpeed(v)) appSpeed = v;
     }
 
     public static float appSpeed() {
@@ -161,28 +225,48 @@ public final class PlaySpeed {
     }
 
     public static float override() {
-        return override;
+        return validSpeed(override) ? clampToPlayer(override, playerRef()) : 0f;
+    }
+
+    /** 用户/配置请求的档位，尚未按当前播放器上限收敛。 */
+    public static float requestedSpeed() {
+        if (validSpeed(override)) return override;
+        if (!followApp) {
+            float configured = ProxyConfig.playbackSpeed();
+            if (validSpeed(configured)) return configured;
+        }
+        return validSpeed(appSpeed) ? appSpeed : 1f;
+    }
+
+    /** 当前应当下发的档位；这不是实际读数，界面要与 actualSpeed 分开。 */
+    public static float targetSpeed() {
+        return clampToPlayer(requestedSpeed(), playerRef());
     }
 
     /**
-     * **当前实际生效的倍速**（≥1）：悬浮球覆盖值 > 配置里的测试值 > 1。
+     * **当前实际生效的倍速**（≥1）：悬浮球覆盖值 > 配置里的测试值 > B站 自己的倍速。
      *
      * 用途（2026-10-13 加）：倍速 3x 时播放器**消耗**的码率也是 3 倍，
      * 所以"够不够快"的目标（并发控制器的 target）必须跟着乘上去 ——
      * 实测漏了这一步：3x 下实际只跑到 1.97x，因为控制器还按 1x 的目标判断"够了"。
      */
     public static float activeSpeed() {
-        float v = override;
-        if (v <= 0f) v = ProxyConfig.playbackSpeed();
+        float v = actualSpeed();
+        if (v < 0f) v = targetSpeed();
         return v > 1f ? v : 1f;
     }
 
     /** 悬浮球点了 3x/4x/跟随 时调用。 */
     public static void setOverride(float v) {
-        override = Math.max(0f, v);
+        if (v != 0f && !validSpeed(v)) {
+            Recon.note("SPEED:BALL-ERR", "忽略无效倍速 " + v);
+            return;
+        }
+        override = v;
+        followApp = v == 0f;
         Recon.note("SPEED:BALL", override <= 0f
                 ? ("倍速跟随 B站（恢复 " + appSpeed + "x）")
-                : ("强制倍速 " + override + "x"));
+                : ("请求倍速 " + override + "x，当前目标 " + targetSpeed() + "x"));
         applyNow();   // ★ 两种情况都要主动设一次（跟随 = 设回 B站 的值）
     }
 
@@ -192,9 +276,7 @@ public final class PlaySpeed {
      */
     public static float effective(float fromApp) {
         noteAppSpeed(fromApp);
-        float v = override;
-        if (v <= 0f) v = ProxyConfig.playbackSpeed();
-        return v > 0f ? v : fromApp;
+        return targetSpeed();
     }
 
     /** 立刻对当前播放器生效（含"跟随"时恢复 B站 的值）。 */
@@ -205,16 +287,14 @@ public final class PlaySpeed {
             Recon.note("SPEED:BALL", "还没有播放器实例，等它下次初始化时生效");
             return;
         }
-        float v = override;
-        if (v <= 0f) v = ProxyConfig.playbackSpeed();
-        if (v <= 0f) v = appSpeed;          // ★ 跟随：设回 B站 自己的倍速
-        if (v <= 0f) v = 1f;
+        float requested = requestedSpeed();
+        float v = clampToPlayer(requested, p);
         APPLYING.set(Boolean.TRUE);
         try {
             if (invokeSetSpeed(p, v)) {
                 Recon.note("SPEED:BALL", "已对 " + p.getClass().getSimpleName()
-                        + "@" + Integer.toHexString(System.identityHashCode(p)) + " 设置 " + v + "x"
-                        + "（实测速率见 playback-*.json 的 playRateActual）");
+                        + "@" + Integer.toHexString(System.identityHashCode(p))
+                        + " 请求 " + requested + "x，下发 " + v + "x，播放器读数 " + actualSpeed(p) + "x");
             } else {
                 Recon.note("SPEED:BALL-ERR", "这个播放器上没有找到 setSpeed(float)");
             }

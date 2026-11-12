@@ -23,8 +23,8 @@ android {
         applicationId = "io.github.lwjlw.bilibtr"
         minSdk = 31
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.1.0"
+        versionCode = 4
+        versionName = "1.1.1-fenghengzhi"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -80,6 +80,10 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    testOptions {
+        // JVM protocol tests use real loopback sockets; Android logging is a no-op off-device.
+        unitTests.isReturnDefaultValues = true
     }
 
     packaging {

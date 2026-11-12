@@ -197,9 +197,9 @@ fun SettingsScreen(activity: ComponentActivity) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("播放页悬浮球（3x / 4x）", style = MaterialTheme.typography.titleMedium)
+                        Text("播放页倍速悬浮球", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (s.ball) "播放视频时点一下画面出现，几秒后自动隐藏"
+                            if (s.ball) "点画面显示可用倍速，档位随播放器上限调整，几秒后自动隐藏"
                             else "已关闭，播放页不会有悬浮球",
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -509,11 +509,15 @@ private fun SpeedPanel(json: String) {
                 fontFamily = FontFamily.Monospace,
             )
             Text(
-                "缓冲 ${o.optLong("videoCachedMs") / 1000} 秒（往前缓存）" +
-                    "　倍速 设置 ${o.optDouble("playSpeed", 0.0)}x" +
-                    " / B站 ${o.optDouble("appSpeed", 1.0)}x",
+                "缓冲 ${o.optLong("videoCachedMs") / 1000} 秒（往前缓存）",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
+            )
+            Text(
+                "实际倍速 ${playbackSpeedText(o.optDouble("actualSpeed", -1.0))}" +
+                    "　当前上限 ${playbackSpeedText(o.optDouble("maxSpeed", -1.0))}" +
+                    "　目标 ${playbackSpeedText(o.optDouble("targetSpeed", -1.0))}",
+                style = MaterialTheme.typography.bodySmall,
             )
             val hosts = o.optJSONArray("hosts")
             if (hosts != null && hosts.length() > 0) {
@@ -530,6 +534,11 @@ private fun SpeedPanel(json: String) {
         }
     }
 }
+
+private fun playbackSpeedText(value: Double): String =
+    if (!value.isFinite() || value < 0.5 || value > 20.0) "未读取"
+    else if (value == value.toInt().toDouble()) "${value.toInt()}x"
+    else "${value}x"
 
 @Composable
 private fun Stat(label: String, value: String) {

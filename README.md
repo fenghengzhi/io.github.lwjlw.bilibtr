@@ -44,7 +44,7 @@ already has the right to access**.
 - **Speed panel** — live throughput, stall count, concurrency, TTFB, per-node usage
 - **Node manager** — one-tap speed test of **all candidate nodes**, tap a node to pin it, or stay automatic
 - **Buffer tuning** — manual **buffer size / buffer duration**
-- **Floating speed ball** — **3x / 4x playback speed**, auto-hides when idle
+- **Floating speed ball** — shortcuts adapt to the player's speed limit; auto-hides when idle
 
 ![alt text](screenshot-1.jpg)
 
@@ -54,7 +54,7 @@ already has the right to access**.
 | --- | --- |
 | OS | Android 12 or newer (`minSdk 31`) |
 | Framework | **LSPosed** (API 102) |
-| Host app | Bilibili client (`tv.danmaku.bili`) (developed and verified on **9.8.0**) |
+| Host app | Bilibili client (`tv.danmaku.bili`); upstream verified **9.8.0**, this fork also tested **9.17.0 (9170300), ARM64 / Android 14 / LSPosed API 102** |
 
 > The module does **not** request overlay permission.
 
@@ -99,12 +99,17 @@ already has the right to access**.
 
 While playing:
 
-1. **Tap the screen** → three buttons `3x` `4x` `跟` appear on the right;
+1. **Tap the screen** → two available speed shortcuts and `跟` appear on the right;
 2. **Press and drag** it anywhere; it **auto-hides when idle**;
-3. Tap `3x` / `4x` to force that speed; tap `跟` to restore Bilibili's own speed;
+3. Tap a speed to apply it; tap `跟` to restore Bilibili's own speed;
 4. Turn the ball off in the app if you don't need it.
 
 > Note: after forcing a speed, Bilibili's own UI **still shows the original value**.
+
+The module shows the player's reported limit and actual speed separately from the applied target speed.
+On the tested 9.17.0 player, 4x is capped at 3x; some decoding modes may cap it at 2x.
+Shortcuts therefore become 2x/3x or 1.5x/2x. Players that report support for 4x retain 3x/4x.
+An unavailable reading is shown as unknown; the module does not patch native speed limits.
 
 ## How it works
 
@@ -133,7 +138,7 @@ side reports state.
 
 ## Building from source
 
-Requires JDK 17+ and the Android SDK (platform 37).
+Requires JDK 25 (pinned by `gradle/gradle-daemon-jvm.properties`) and the Android SDK (platform 37).
 
 ```bash
 git clone <this-repo>
@@ -151,11 +156,14 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 ## FAQ
 
 **Q: The speed panel says "not connected".**
-A: Bilibili isn't running. Play a video first, then return to BiliBTR.
+A: Start Bilibili and verify that LSPosed can actually inject into it. Enabling a module alone is
+not enough if Zygisk Next's enforced whitelist excludes Bilibili. Check the framework configuration
+before troubleshooting the local connection; this module does not require granting Bilibili root.
 
 **Q: Does it support other Bilibili versions?**
-A: Developed and verified on **9.8.0**. Other versions may stop working — feel free to
-open an issue.
+A: Upstream targeted **9.8.0**; this fork has also tested **9.17.0**. Playback, CDN selection,
+HTTPS ranges, configuration and speed controls were checked on the environment listed above.
+Other devices, decoding modes and versions still need testing; acceleration depends on the network.
 
 **Q: Does it use more data?**
 A: Read-ahead and concurrent fetching add a little traffic (prefetch + light probing);

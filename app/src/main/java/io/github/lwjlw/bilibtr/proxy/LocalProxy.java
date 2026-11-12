@@ -281,8 +281,7 @@ public final class LocalProxy {
             }
 
             URL u = new URL(upUrl);
-            int upPort = u.getPort() > 0 ? u.getPort() : ("https".equalsIgnoreCase(u.getProtocol()) ? 443 : 80);
-            upstream = UpstreamPool.acquire(u.getHost(), upPort, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS);
+            upstream = UpstreamPool.acquire(u, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS);
             UpstreamPool.noteReuse(upstream);
 
             // 原样转发请求（签名 query 必须一字不动），只换 Host、强制短连接
@@ -304,17 +303,18 @@ public final class LocalProxy {
             long ttfb = SystemClock.elapsedRealtime() - tReq;
             out.write((status + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
             long contentLength = -1;
+            boolean connectionClose = status.startsWith("HTTP/1.0");
+            boolean transferEncoded = false;
             String contentRange = null;
             String line;
             while ((line = readLine(upIn)) != null && !line.isEmpty()) {
                 String low = line.toLowerCase(Locale.US);
                 if (low.startsWith("connection:")) {
-                    if (line.toLowerCase(Locale.US).contains("close")) upstream.reusable = false;
+                    if (low.contains("close")) connectionClose = true;
                     continue;
                 }
-                if (low.startsWith("transfer-encoding:")
-                        && line.toLowerCase(Locale.US).contains("chunked")) {
-                    upstream.reusable = false;
+                if (low.startsWith("transfer-encoding:")) {
+                    transferEncoded = true;
                 }
                 if (low.startsWith("content-length:")) {
                     try {
@@ -326,6 +326,7 @@ public final class LocalProxy {
                 }
                 out.write((line + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
             }
+            upstream.reusable = !connectionClose && !transferEncoded && contentLength >= 0;
             out.write("Connection: close\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1));
             out.flush();
 
@@ -423,7 +424,9 @@ public final class LocalProxy {
                                                Map<String, String> headers) {
         StringBuilder req = new StringBuilder(512);
         req.append(method).append(' ').append(pathWithQuery(original)).append(" HTTP/1.1\r\n");
-        req.append("Host: ").append(u.getHost()).append("\r\n");
+        req.append("Host: ").append(u.getHost());
+        if (u.getPort() > 0 && u.getPort() != u.getDefaultPort()) req.append(':').append(u.getPort());
+        req.append("\r\n");
         for (Map.Entry<String, String> e : headers.entrySet()) {
             String k = e.getKey();
             if (isHopByHop(k) || "host".equals(k)) continue;

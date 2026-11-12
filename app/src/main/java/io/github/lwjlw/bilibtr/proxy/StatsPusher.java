@@ -81,6 +81,10 @@ public final class StatsPusher {
         sb.append(",\"videoCachedMs\":").append(SpeedSession.lastVideoCachedMs());   // "往前缓冲了几秒"
         sb.append(",\"playSpeed\":").append(PlaySpeed.override());
         sb.append(",\"appSpeed\":").append(PlaySpeed.appSpeed());
+        sb.append(",\"requestedSpeed\":").append(PlaySpeed.requestedSpeed());
+        sb.append(",\"targetSpeed\":").append(PlaySpeed.targetSpeed());
+        sb.append(",\"actualSpeed\":").append(PlaySpeed.actualSpeed());
+        sb.append(",\"maxSpeed\":").append(PlaySpeed.maxSpeed());
         sb.append(",\"stallsPerMin\":").append(SpeedSession.lastStallsPerMin());
         sb.append(",\"ttfbP50Ms\":").append(SpeedSession.lastTtfbP50());
         String active = CdnRacer.activeHost();

@@ -108,57 +108,75 @@ public final class ConfigServer {
     }
 
     /** 把界面推来的设置落盘到 B站 目录下的 btr.conf（所有进程都能读）。 */
-    private static void writeConfFile() {
+    private static synchronized void writeConfFile() {
         try {
             java.io.File dir = io.github.lwjlw.bilibtr.recon.AppHolder.reconDir();
             if (dir == null) return;
             if (!dir.isDirectory() && !dir.mkdirs()) return;
-            StringBuilder sb = new StringBuilder();
-            sb.append("# BiliBTR —— 这个文件由界面自动生成（也可手工编辑）\n");
-            synchronized (LIVE) {
-                sb.append("enabled=").append(LIVE.getOrDefault("enabled", "true")).append('\n');
-                sb.append("mode=").append(LIVE.getOrDefault("mode", "proxy")).append('\n');
-                sb.append("concurrency=").append(LIVE.getOrDefault("concurrency", "8")).append('\n');
-                sb.append("minsplitkb=").append(LIVE.getOrDefault("minsplitkb", "128")).append('\n');
-                sb.append("port=").append(LIVE.getOrDefault("port", "18888")).append('\n');
-                sb.append("bufsizekb=").append(LIVE.getOrDefault("bufsizekb", "0")).append('\n');
-                sb.append("buftimems=").append(LIVE.getOrDefault("buftimems", "0")).append('\n');
-                // 三个缓冲水位（2026-10-13 加）：界面没有入口，**不在 LIVE 里就沿用当前值**，
-                // 免得手工在 btr.conf 里调过的值被下一次界面推送抹掉。
-                sb.append("firstms=").append(LIVE.getOrDefault("firstms",
-                        String.valueOf(ProxyConfig.firstWaterMs()))).append('\n');
-                sb.append("nextms=").append(LIVE.getOrDefault("nextms",
-                        String.valueOf(ProxyConfig.nextWaterMs()))).append('\n');
-                sb.append("lastms=").append(LIVE.getOrDefault("lastms",
-                        String.valueOf(ProxyConfig.lastWaterMs()))).append('\n');
-                sb.append("maxbufs=").append(LIVE.getOrDefault("maxbufs",
-                        String.valueOf(ProxyConfig.maxBufferSeconds()))).append('\n');
-                sb.append("ball=").append(LIVE.getOrDefault("ball", "true")).append('\n');
-                // 自动测速选节点 / 换节点提示：**不在 LIVE 里就沿用当前值**
-                // （同 recon 的道理：手工在 btr.conf 里改过的不能被下一次界面推送抹掉）
-                sb.append("autopick=").append(LIVE.getOrDefault("autopick",
-                        ProxyConfig.autoPick() ? "true" : "false")).append('\n');
-                sb.append("toast=").append(LIVE.getOrDefault("toast",
-                        ProxyConfig.toastEnabled() ? "true" : "false")).append('\n');
-                // 侦察探针开关：**不在 LIVE 里就沿用当前值**。
-                // 不能写成 getOrDefault("recon","false")：那样手工设的 recon=1
-                // 会被下一次界面推送悄悄抹掉（这个文件是整体覆写的）。
-                sb.append("recon=").append(LIVE.getOrDefault("recon",
-                        ProxyConfig.reconProbes() ? "true" : "false")).append('\n');
-                String sp = LIVE.get("speed");
-                if (sp != null) sb.append("speed=").append(sp).append('\n');
-            }
+            String contents = persistentConfigText();
             java.io.File f = new java.io.File(dir, "btr.conf");
-            java.io.FileOutputStream fos = new java.io.FileOutputStream(f, false);
-            try {
-                fos.write(sb.toString().getBytes("UTF-8"));
-                fos.flush();
-            } finally {
-                fos.close();
-            }
+            writeConfigAtomically(f, contents);
         } catch (Throwable t) {
             Recon.note("CFG:ERR", "写 btr.conf 失败：" + t);
         }
+    }
+
+    /** Other host processes must see either complete snapshot, never a truncated btr.conf. */
+    static void writeConfigAtomically(java.io.File target, String contents) throws java.io.IOException {
+        java.io.File temporary = java.io.File.createTempFile("btr-conf-", ".tmp",
+                target.getAbsoluteFile().getParentFile());
+        try {
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(temporary)) {
+                out.write(contents.getBytes(StandardCharsets.UTF_8));
+                out.getFD().sync();
+            }
+            // Same-directory rename is atomic. If unsupported or writing fails, keep the old file.
+            java.nio.file.Files.move(temporary.toPath(), target.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            java.nio.file.Files.deleteIfExists(temporary.toPath());
+        }
+    }
+
+    /** 将配置序列化为文件内容，保留自动水位的 0 标记。 */
+    private static String persistentConfigText() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# BiliBTR —— 这个文件由界面自动生成（也可手工编辑）\n");
+        synchronized (LIVE) {
+            sb.append("enabled=").append(LIVE.getOrDefault("enabled", "true")).append('\n');
+            sb.append("mode=").append(LIVE.getOrDefault("mode", "proxy")).append('\n');
+            sb.append("concurrency=").append(LIVE.getOrDefault("concurrency", "8")).append('\n');
+            sb.append("minsplitkb=").append(LIVE.getOrDefault("minsplitkb", "128")).append('\n');
+            sb.append("port=").append(LIVE.getOrDefault("port", "18888")).append('\n');
+            sb.append("bufsizekb=").append(LIVE.getOrDefault("bufsizekb", "0")).append('\n');
+            sb.append("buftimems=").append(LIVE.getOrDefault("buftimems", "0")).append('\n');
+            // 三个缓冲水位（2026-10-13 加）：界面没有入口，**不在 LIVE 里就沿用当前值**，
+            // 免得手工在 btr.conf 里调过的值被下一次界面推送抹掉。
+            sb.append("firstms=").append(LIVE.getOrDefault("firstms",
+                    String.valueOf(ProxyConfig.firstWaterMs()))).append('\n');
+            sb.append("nextms=").append(LIVE.getOrDefault("nextms",
+                    String.valueOf(ProxyConfig.nextWaterMs()))).append('\n');
+            sb.append("lastms=").append(LIVE.getOrDefault("lastms",
+                    String.valueOf(ProxyConfig.lastWaterOverrideMs()))).append('\n');
+            sb.append("maxbufs=").append(LIVE.getOrDefault("maxbufs",
+                    String.valueOf(ProxyConfig.maxBufferSeconds()))).append('\n');
+            sb.append("ball=").append(LIVE.getOrDefault("ball", "true")).append('\n');
+            // 自动测速选节点 / 换节点提示：**不在 LIVE 里就沿用当前值**
+            // （同 recon 的道理：手工在 btr.conf 里改过的不能被下一次界面推送抹掉）
+            sb.append("autopick=").append(LIVE.getOrDefault("autopick",
+                    ProxyConfig.autoPick() ? "true" : "false")).append('\n');
+            sb.append("toast=").append(LIVE.getOrDefault("toast",
+                    ProxyConfig.toastEnabled() ? "true" : "false")).append('\n');
+            // 侦察探针开关：**不在 LIVE 里就沿用当前值**。
+            // 不能写成 getOrDefault("recon","false")：那样手工设的 recon=1
+            // 会被下一次界面推送悄悄抹掉（这个文件是整体覆写的）。
+            sb.append("recon=").append(LIVE.getOrDefault("recon",
+                    ProxyConfig.reconProbes() ? "true" : "false")).append('\n');
+            String sp = LIVE.get("speed");
+            if (sp != null) sb.append("speed=").append(sp).append('\n');
+        }
+        return sb.toString();
     }
 
     public static void setStats(String json) {

@@ -31,6 +31,8 @@ public final class SpeedOverrideProbe {
         int n = 0;
         for (Method m : Reflect.declaredNamed(ijk, "setSpeed")) {
             Hooks.install(x, m, "speed-override", chain -> {
+                // Use this player's capability even when another/preloaded player was captured last.
+                io.github.lwjlw.bilibtr.proxy.PlaySpeed.capture(chain.getThisObject());
                 float fromApp = 1f;
                 try {
                     Object a = chain.getArgs().isEmpty() ? null : chain.getArg(0);

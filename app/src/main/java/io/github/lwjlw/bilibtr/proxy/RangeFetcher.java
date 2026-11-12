@@ -151,7 +151,10 @@ public final class RangeFetcher {
         }
 
         long written = 0;
+        boolean responseStarted = false;
         try {
+            // Even a partial header write commits this response: never append a fallback response.
+            responseStarted = true;
             writeStreamHeaders(clientOut, start, end, c0.total, c0.contentType);
             byte[] buf = new byte[BUF];
             long remain = c0.contentLength;
@@ -229,7 +232,7 @@ public final class RangeFetcher {
         } catch (Throwable t) {
             noteFail();
             Recon.note("PROXY:STREAM-ERR", String.valueOf(t) + " 已写 " + written + "B");
-            return written == 0 ? STREAM_NOT_STARTED : STREAM_ABORTED;
+            return responseStarted ? STREAM_ABORTED : STREAM_NOT_STARTED;
         } finally {
             c0.finish();
         }
@@ -264,9 +267,7 @@ public final class RangeFetcher {
             long t0 = System.currentTimeMillis();
             try {
                 URL u = new URL(url);
-                int port = u.getPort() > 0 ? u.getPort()
-                        : ("https".equalsIgnoreCase(u.getProtocol()) ? 443 : 80);
-                c.pc = UpstreamPool.acquire(u.getHost(), port,
+                c.pc = UpstreamPool.acquire(u,
                         LIGHT.get() ? LIGHT_CONNECT_MS : CONNECT_TIMEOUT_MS,
                         LIGHT.get() ? LIGHT_READ_MS : READ_TIMEOUT_MS);
                 UpstreamPool.noteReuse(c.pc);
@@ -425,8 +426,7 @@ public final class RangeFetcher {
         LAST_PART_ERR.remove();
         try {
             URL u = new URL(url);
-            int port = u.getPort() > 0 ? u.getPort() : ("https".equalsIgnoreCase(u.getProtocol()) ? 443 : 80);
-            c = UpstreamPool.acquire(u.getHost(), port,
+            c = UpstreamPool.acquire(u,
                     LIGHT.get() ? LIGHT_CONNECT_MS : CONNECT_TIMEOUT_MS,
                     LIGHT.get() ? LIGHT_READ_MS : READ_TIMEOUT_MS);
             UpstreamPool.noteReuse(c);
@@ -499,7 +499,9 @@ public final class RangeFetcher {
         StringBuilder sb = new StringBuilder(512);
         sb.append(method).append(' ').append(path)
                 .append(query == null ? "" : "?" + query).append(" HTTP/1.1\r\n");
-        sb.append("Host: ").append(u.getHost()).append("\r\n");
+        sb.append("Host: ").append(u.getHost());
+        if (u.getPort() > 0 && u.getPort() != u.getDefaultPort()) sb.append(':').append(u.getPort());
+        sb.append("\r\n");
         for (Map.Entry<String, String> e : headers.entrySet()) {
             String k = e.getKey();
             if (isHopByHop(k) || "host".equals(k) || "range".equals(k)) continue;

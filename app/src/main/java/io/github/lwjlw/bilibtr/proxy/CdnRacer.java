@@ -140,7 +140,10 @@ public final class CdnRacer {
      * "锁定了 hz，地址却 sz、hz 跳来跳去"）。
      */
     private static void noteUsed(String url, String current) {
-        if (url != null && isVideoStream(current)) lastUsed = url;
+        if (url != null && isVideoStream(current)) {
+            lastUsed = url;
+            activeHost = Recon.hostOf(url);
+        }
     }
 
     public static String lastUsed() {
@@ -193,9 +196,28 @@ public final class CdnRacer {
         return autoMode;
     }
 
-    /** 是不是视频流（用 URL 里的 `bw` 判断：视频远大于音频）。 */
+    private static final java.util.regex.Pattern DASH_STREAM_ID =
+            java.util.regex.Pattern.compile("-(30[012]\\d{2})\\.m4s$", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /** 优先按 B站 DASH 流 ID 识别；低码率视频和高码率音频不能靠带宽区分。 */
     static boolean isVideoStream(String url) {
-        return targetBps(url) >= 128 * 1024;   // 目标 ≥128KB/s（≈1Mbps）才算视频；音频只有 ~15KB/s
+        if (url == null || url.isEmpty()) return false;
+        int end = url.length();
+        int query = url.indexOf('?');
+        int fragment = url.indexOf('#');
+        if (query >= 0) end = Math.min(end, query);
+        if (fragment >= 0) end = Math.min(end, fragment);
+        String path = url.substring(0, end).toLowerCase(Locale.ROOT);
+        java.util.regex.Matcher stream = DASH_STREAM_ID.matcher(path);
+        if (stream.find()) {
+            // 300xx / 301xx 包含 AVC、HEVC、AV1 视频；302xx 是音频家族。
+            return !stream.group(1).startsWith("302");
+        }
+        if (path.endsWith(".m4a") || path.endsWith(".aac") || path.endsWith(".mp3")) return false;
+        if (path.endsWith(".mp4") || path.endsWith(".flv")) return true;
+        // 未知流格式只在提供了码率时沿用旧启发式，不能把所有 m4s 都当作视频。
+        long bandwidth = queryLong(url, "bw");
+        return bandwidth > 0 && bandwidth / 8.0 * TARGET_MARGIN >= 128 * 1024;
     }
 
     public static String cidOf(String url) {
@@ -488,7 +510,10 @@ public final class CdnRacer {
                 //   （不需要打开 btr 软件）。延时 + 限窗都在 AutoPicker 里，避免抢起播的带宽。
                 AutoPicker.onNewVideo(cid, lastCands, headers);
             }
-            if (cands.size() < 2) return current;
+            if (cands.size() < 2) {
+                noteUsed(current, current);
+                return current;
+            }
             String key = keyOf(cands);
             String anchor = Recon.hostOf(current);
             if (anchor == null) return current;
@@ -532,7 +557,7 @@ public final class CdnRacer {
             }
 
             // ⓪.6 **自动测速的结论**：探测明确更快（≥1.2×）→ 换过去（用户要求：测速选最快）
-            String probePick = tryProbeSwitch(anchor, "自动测速");
+            String probePick = tryProbeSwitch(anchor, "自动测速", cands);
             if (probePick != null) {
                 noteUsed(probePick, current);
                 return probePick;
@@ -543,7 +568,6 @@ public final class CdnRacer {
 
             // ① 锚点够用 → 不动（锚点优先）
             if (anchorEma != null && anchorEma >= target) {
-                activeHost = anchor;
                 noteUsed(current, current);
                 if (Recon.first("CDN:KEEP", anchor)) {
                     Recon.note("CDN:KEEP", "锚点 " + shortHost(anchor) + " 实测 " + kb(anchorEma)
@@ -558,7 +582,6 @@ public final class CdnRacer {
                 if (best != null && best.bps >= anchorEma * SWITCH_MARGIN) {
                     if (switchAllowed()) {
                         markSwitch();
-                        activeHost = best.host;
                         // ★ 必须记住这个决定：否则下一个请求（毫秒级之后）会因为
                         //   "刚切过、驻留期内不许再切" 而退回锚点 —— 变成 15 秒一次的来回横跳。
                         autoHost = best.host;
@@ -576,12 +599,14 @@ public final class CdnRacer {
                         Recon.note("CDN:HOLD", "本可换到 " + shortHost(best.host)
                                 + "，但受驻留/频率限制，暂缓");
                     }
+                    noteUsed(current, current);
                     return current;
                 }
                 if (Recon.first("CDN:KEEP-UNDER", anchor)) {
                     Recon.note("CDN:KEEP", "锚点 " + shortHost(anchor) + "=" + kb(anchorEma)
                             + " 低于目标 " + kb(target) + "，但**没有可信的更优节点** → 不猜、保持");
                 }
+                noteUsed(current, current);
                 return current;
             }
 
@@ -594,7 +619,6 @@ public final class CdnRacer {
                         Recon.note("CDN:COLD", "起播冷启动：探测优选 " + shortHost(p.host)
                                 + "（锚点 " + shortHost(anchor) + " 尚无实测）");
                     }
-                    activeHost = p.host;
                     noteUsed(u, current);
                     return u;
                 }
@@ -780,9 +804,8 @@ public final class CdnRacer {
      * @return 换过去的完整地址；null = 不需要换 / 不允许换
      * @param reason 这次决策的来源（"进视频" / "stall" / …），只用于日志与 Toast 文案
      */
-    private static String tryProbeSwitch(String anchor, String reason) {
+    private static String tryProbeSwitch(String anchor, String reason, List<String> cands) {
         try {
-            List<String> cands = lastCands;
             if (cands.size() < 2) return null;
             if (pinHost != null || !autoMode) return null;
             HostBps best = bestProbe(cands);
@@ -822,7 +845,7 @@ public final class CdnRacer {
             markSwitch();
             autoHost = best.host;
             autoHostAt = System.currentTimeMillis();
-            activeHost = best.host;
+            if (isVideoStream(cands.get(0))) activeHost = best.host;
             // 立刻生效：丢弃旧节点的空闲连接。
             // ⚠️ **不清预读缓存**：缓存键是文件路径，换节点拿到的还是同一个文件的字节，
             //    清掉只会白白浪费已经预读好的数据（`pin()` 清是因为那是用户手动操作，
@@ -854,7 +877,7 @@ public final class CdnRacer {
     public static String selectByProbe(String reason) {
         String base = lastUrl;
         String anchor = base == null ? null : Recon.hostOf(base);
-        boolean switched = tryProbeSwitch(anchor, reason) != null;
+        boolean switched = tryProbeSwitch(anchor, reason, lastCands) != null;
         if (!switched && Recon.first("AUTO:NO-SWITCH", reason)) {
             Recon.note("AUTO:NO-SWITCH", "本轮自动测速（" + reason
                     + "）没有换节点：当前 " + shortHost(activeHost) + " 已是最优或未达门槛");

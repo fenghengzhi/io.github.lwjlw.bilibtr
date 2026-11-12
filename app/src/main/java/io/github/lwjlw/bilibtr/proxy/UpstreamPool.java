@@ -5,10 +5,18 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.URL;
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 
 import io.github.lwjlw.bilibtr.recon.Recon;
 
@@ -42,6 +50,7 @@ public final class UpstreamPool {
         public OutputStream out;
         public String host;
         public int port;
+        public String scheme;
         /** 本响应结束后是否允许复用（由响应头决定）。 */
         public boolean reusable;
         /** 是否是从池里拿到的（用于日志统计）。 */
@@ -61,16 +70,27 @@ public final class UpstreamPool {
     private UpstreamPool() {
     }
 
-    private static String key(String host, int port) {
-        return host + ":" + port;
+    private static String key(String scheme, String host, int port) {
+        return scheme + "://" + host.toLowerCase(Locale.US) + ":" + port;
     }
 
     /** 拿一条连接：优先复用，没有就新建。 */
-    public static Conn acquire(String host, int port, int connectTimeoutMs, int soTimeoutMs)
+    public static Conn acquire(URL url, int connectTimeoutMs, int soTimeoutMs)
             throws IOException {
-        Deque<Conn> dq = IDLE.get(key(host, port));
+        String scheme = url.getProtocol().toLowerCase(Locale.US);
+        if (!"http".equals(scheme) && !"https".equals(scheme)) {
+            throw new IOException("Unsupported upstream scheme: " + scheme);
+        }
+        String host = url.getHost();
+        int port = url.getPort() > 0 ? url.getPort() : url.getDefaultPort();
+        Deque<Conn> dq = IDLE.get(key(scheme, host, port));
         if (dq != null) {
-            for (Conn c = dq.pollFirst(); c != null; c = dq.pollFirst()) {
+            while (true) {
+                Conn c;
+                synchronized (dq) {
+                    c = dq.pollFirst();
+                }
+                if (c == null) break;
                 if (System.currentTimeMillis() - c.idleSince > IDLE_TIMEOUT_MS
                         || c.sock.isClosed() || !c.sock.isConnected()) {
                     c.close();
@@ -90,16 +110,38 @@ public final class UpstreamPool {
             }
         }
         Conn c = new Conn();
+        c.scheme = scheme;
         c.host = host;
         c.port = port;
         c.sock = new Socket();
-        c.sock.setTcpNoDelay(true);
-        c.sock.connect(new InetSocketAddress(host, port), connectTimeoutMs);
-        c.sock.setSoTimeout(soTimeoutMs);
-        c.in = new BufferedInputStream(c.sock.getInputStream(), 16384);
-        c.out = c.sock.getOutputStream();
-        c.reused = false;
-        return c;
+        try {
+            c.sock.setTcpNoDelay(true);
+            c.sock.connect(new InetSocketAddress(host, port), connectTimeoutMs);
+            c.sock.setSoTimeout(soTimeoutMs);
+            if ("https".equals(scheme)) {
+                SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
+                        .createSocket(c.sock, host, port, true);
+                c.sock = tls;
+                tls.setSoTimeout(soTimeoutMs);
+                SSLParameters parameters = tls.getSSLParameters();
+                // A raw SSLSocket validates trust, but hostname verification is opt-in.
+                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                try {
+                    parameters.setServerNames(Collections.singletonList(new SNIHostName(host)));
+                } catch (IllegalArgumentException ignored) {
+                    // IP literals do not use SNI; HTTPS identity checking still applies.
+                }
+                tls.setSSLParameters(parameters);
+                tls.startHandshake();
+            }
+            c.in = new BufferedInputStream(c.sock.getInputStream(), 16384);
+            c.out = c.sock.getOutputStream();
+            c.reused = false;
+            return c;
+        } catch (IOException | RuntimeException failure) {
+            c.close();
+            throw failure;
+        }
     }
 
     /**
@@ -144,7 +186,7 @@ public final class UpstreamPool {
             return false;
         }
         c.idleSince = System.currentTimeMillis();
-        Deque<Conn> dq = IDLE.computeIfAbsent(key(c.host, c.port), k -> new ArrayDeque<>());
+        Deque<Conn> dq = IDLE.computeIfAbsent(key(c.scheme, c.host, c.port), k -> new ArrayDeque<>());
         synchronized (dq) {
             if (dq.size() >= MAX_IDLE_PER_HOST) {
                 c.close();
